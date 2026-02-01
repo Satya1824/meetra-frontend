@@ -8,7 +8,12 @@ interface PeerConnection {
   peer: SimplePeer.Instance;
   stream?: MediaStream;
   isInitiator: boolean; // Track who initiated the connection
+  reconnectAttempts: number; // Track reconnection attempts
+  lastReconnectTime: number; // Track last reconnection time for backoff
 }
+
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_BASE_DELAY = 1000; // 1 second base delay
 
 export const useWebRTC = (
   localStream: MediaStream | null,
@@ -34,7 +39,12 @@ export const useWebRTC = (
         const peer = createPeer(participant.id, localStream, socket, roomId, userId);
         
         const newPeers = new Map(peersRef.current);
-        newPeers.set(participant.id, { peer, isInitiator: true });
+        newPeers.set(participant.id, { 
+          peer, 
+          isInitiator: true,
+          reconnectAttempts: 0,
+          lastReconnectTime: 0
+        });
         peersRef.current = newPeers;
         setPeers(new Map(newPeers));
       }
@@ -63,7 +73,12 @@ export const useWebRTC = (
       const peer = createPeer(newUserId, localStream, socket, roomId, userId);
       
       const newPeers = new Map(peersRef.current);
-      newPeers.set(newUserId, { peer, isInitiator: true });
+      newPeers.set(newUserId, { 
+        peer, 
+        isInitiator: true,
+        reconnectAttempts: 0,
+        lastReconnectTime: 0
+      });
       peersRef.current = newPeers;
       setPeers(new Map(newPeers));
     });
@@ -81,13 +96,42 @@ export const useWebRTC = (
           const peer = addPeer(signal, localStream, socket, roomId, userId, signalingUserId);
           
           const newPeers = new Map(peersRef.current);
-          newPeers.set(signalingUserId, { peer, isInitiator: false });
+          newPeers.set(signalingUserId, { 
+            peer, 
+            isInitiator: false,
+            reconnectAttempts: 0,
+            lastReconnectTime: 0
+          });
           peersRef.current = newPeers;
           setPeers(new Map(newPeers));
         } else {
-          // Peer was destroyed, recreate with same role
-          console.log('🔄 Recreating peer connection for:', signalingUserId);
-          const isInitiator = peerConnection.isInitiator;
+          // Peer was destroyed, check if we should attempt reconnection
+          const { isInitiator, reconnectAttempts, lastReconnectTime } = peerConnection;
+          
+          // Check if max attempts exceeded
+          if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            console.error('❌ Max reconnection attempts exceeded for:', signalingUserId);
+            // Clean up the peer completely
+            const newPeers = new Map(peersRef.current);
+            newPeers.delete(signalingUserId);
+            peersRef.current = newPeers;
+            setPeers(new Map(newPeers));
+            return;
+          }
+          
+          // Calculate exponential backoff delay
+          const now = Date.now();
+          const backoffDelay = RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts);
+          const timeSinceLastReconnect = now - lastReconnectTime;
+          
+          // If not enough time has passed, skip this reconnection attempt
+          if (lastReconnectTime > 0 && timeSinceLastReconnect < backoffDelay) {
+            console.log(`⏳ Waiting ${backoffDelay - timeSinceLastReconnect}ms before reconnection attempt ${reconnectAttempts + 1}`);
+            return;
+          }
+          
+          // Attempt reconnection
+          console.log(`🔄 Reconnection attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS} for:`, signalingUserId);
           
           let peer;
           if (isInitiator) {
@@ -97,7 +141,12 @@ export const useWebRTC = (
           }
           
           const newPeers = new Map(peersRef.current);
-          newPeers.set(signalingUserId, { peer, isInitiator });
+          newPeers.set(signalingUserId, { 
+            peer, 
+            isInitiator,
+            reconnectAttempts: reconnectAttempts + 1,
+            lastReconnectTime: now
+          });
           peersRef.current = newPeers;
           setPeers(new Map(newPeers));
         }
@@ -175,19 +224,27 @@ export const useWebRTC = (
       const existingPeer = newPeers.get(targetUserId);
       if (existingPeer) {
         existingPeer.stream = remoteStream;
+        // Reset reconnection attempts on successful connection
+        existingPeer.reconnectAttempts = 0;
+        existingPeer.lastReconnectTime = 0;
         peersRef.current = newPeers;
         setPeers(new Map(newPeers));
       }
     });
 
     peer.on('error', (error: any) => {
-      // Ignore certain expected errors
-      if (error.code === 'ERR_CONNECTION_FAILURE' || 
-          error.message?.includes('setRemoteDescription') ||
-          error.message?.includes('connection failed')) {
-        console.log('⚠️ Peer connection error (will retry):', targetUserId);
-      } else {
-        console.error('Peer error:', error);
+      const peerConnection = peersRef.current.get(targetUserId);
+      const attempts = peerConnection?.reconnectAttempts || 0;
+      
+      // Show error details for debugging
+      const errorMsg = error.message || error.code || 'Unknown error';
+      console.log(`⚠️ Peer error [attempt ${attempts}/${MAX_RECONNECT_ATTEMPTS}]: ${errorMsg} (${targetUserId})`);
+      
+      // Log full error for unexpected errors
+      if (error.code !== 'ERR_CONNECTION_FAILURE' && 
+          !error.message?.includes('setRemoteDescription') &&
+          !error.message?.includes('connection failed')) {
+        console.error('Unexpected peer error:', error);
       }
     });
 
@@ -240,19 +297,27 @@ export const useWebRTC = (
       const existingPeer = newPeers.get(signalingUserId);
       if (existingPeer) {
         existingPeer.stream = remoteStream;
+        // Reset reconnection attempts on successful connection
+        existingPeer.reconnectAttempts = 0;
+        existingPeer.lastReconnectTime = 0;
         peersRef.current = newPeers;
         setPeers(new Map(newPeers));
       }
     });
 
     peer.on('error', (error: any) => {
-      // Ignore certain expected errors
-      if (error.code === 'ERR_CONNECTION_FAILURE' || 
-          error.message?.includes('setRemoteDescription') ||
-          error.message?.includes('connection failed')) {
-        console.log('⚠️ Peer connection error (will retry):', signalingUserId);
-      } else {
-        console.error('Peer error:', error);
+      const peerConnection = peersRef.current.get(signalingUserId);
+      const attempts = peerConnection?.reconnectAttempts || 0;
+      
+      // Show error details for debugging
+      const errorMsg = error.message || error.code || 'Unknown error';
+      console.log(`⚠️ Peer error [attempt ${attempts}/${MAX_RECONNECT_ATTEMPTS}]: ${errorMsg} (${signalingUserId})`);
+      
+      // Log full error for unexpected errors
+      if (error.code !== 'ERR_CONNECTION_FAILURE' && 
+          !error.message?.includes('setRemoteDescription') &&
+          !error.message?.includes('connection failed')) {
+        console.error('Unexpected peer error:', error);
       }
     });
 
