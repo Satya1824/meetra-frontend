@@ -7,6 +7,7 @@ import { Participant } from '@/types';
 interface PeerConnection {
   peer: SimplePeer.Instance;
   stream?: MediaStream;
+  isInitiator: boolean; // Track who initiated the connection
 }
 
 export const useWebRTC = (
@@ -33,7 +34,7 @@ export const useWebRTC = (
         const peer = createPeer(participant.id, localStream, socket, roomId, userId);
         
         const newPeers = new Map(peersRef.current);
-        newPeers.set(participant.id, { peer });
+        newPeers.set(participant.id, { peer, isInitiator: true });
         peersRef.current = newPeers;
         setPeers(new Map(newPeers));
       }
@@ -49,13 +50,20 @@ export const useWebRTC = (
     socket.on('user-joined', ({ userId: newUserId }: { userId: string }) => {
       if (newUserId === userId) return;
 
+      // Check if peer already exists
+      const existingPeer = peersRef.current.get(newUserId);
+      if (existingPeer && !existingPeer.peer.destroyed) {
+        console.log('👤 Peer already exists for:', newUserId);
+        return; // Don't create duplicate
+      }
+
       console.log('👤 New user joined, creating peer connection:', newUserId);
 
       // Create peer connection as initiator
       const peer = createPeer(newUserId, localStream, socket, roomId, userId);
       
       const newPeers = new Map(peersRef.current);
-      newPeers.set(newUserId, { peer });
+      newPeers.set(newUserId, { peer, isInitiator: true });
       peersRef.current = newPeers;
       setPeers(new Map(newPeers));
     });
@@ -66,21 +74,37 @@ export const useWebRTC = (
 
       let peerConnection = peersRef.current.get(signalingUserId);
 
-      if (!peerConnection) {
-        console.log('🆕 Creating new peer connection as receiver for:', signalingUserId);
-        // Create peer connection as receiver
-        const peer = addPeer(signal, localStream, socket, roomId, userId, signalingUserId);
-        
-        const newPeers = new Map(peersRef.current);
-        newPeers.set(signalingUserId, { peer });
-        peersRef.current = newPeers;
-        setPeers(new Map(newPeers));
+      if (!peerConnection || peerConnection.peer.destroyed) {
+        // Only create new peer as receiver if we don't already have one
+        if (!peerConnection) {
+          console.log('🆕 Creating new peer connection as receiver for:', signalingUserId);
+          const peer = addPeer(signal, localStream, socket, roomId, userId, signalingUserId);
+          
+          const newPeers = new Map(peersRef.current);
+          newPeers.set(signalingUserId, { peer, isInitiator: false });
+          peersRef.current = newPeers;
+          setPeers(new Map(newPeers));
+        } else {
+          // Peer was destroyed, recreate with same role
+          console.log('🔄 Recreating peer connection for:', signalingUserId);
+          const isInitiator = peerConnection.isInitiator;
+          
+          let peer;
+          if (isInitiator) {
+            peer = createPeer(signalingUserId, localStream, socket, roomId, userId);
+          } else {
+            peer = addPeer(signal, localStream, socket, roomId, userId, signalingUserId);
+          }
+          
+          const newPeers = new Map(peersRef.current);
+          newPeers.set(signalingUserId, { peer, isInitiator });
+          peersRef.current = newPeers;
+          setPeers(new Map(newPeers));
+        }
       } else {
         // Signal existing peer if not destroyed
         try {
-          if (!peerConnection.peer.destroyed) {
-            peerConnection.peer.signal(signal);
-          }
+          peerConnection.peer.signal(signal);
         } catch (error: any) {
           // Ignore errors after peer is destroyed
           if (!error.message?.includes('peer is destroyed')) {
@@ -169,11 +193,12 @@ export const useWebRTC = (
 
     peer.on('close', () => {
       console.log('📴 Peer connection closed:', targetUserId);
-      // Clean up this peer
-      const newPeers = new Map(peersRef.current);
-      newPeers.delete(targetUserId);
-      peersRef.current = newPeers;
-      setPeers(new Map(newPeers));
+      // Mark peer as destroyed but keep entry for potential recreation
+      const peerConnection = peersRef.current.get(targetUserId);
+      if (peerConnection) {
+        // Keep the entry with destroyed peer to maintain role info
+        console.log('⚠️ Keeping peer entry for potential reconnection');
+      }
     });
 
     return peer;
@@ -233,11 +258,12 @@ export const useWebRTC = (
 
     peer.on('close', () => {
       console.log('📴 Peer connection closed:', signalingUserId);
-      // Clean up this peer
-      const newPeers = new Map(peersRef.current);
-      newPeers.delete(signalingUserId);
-      peersRef.current = newPeers;
-      setPeers(new Map(newPeers));
+      // Mark peer as destroyed but keep entry for potential recreation
+      const peerConnection = peersRef.current.get(signalingUserId);
+      if (peerConnection) {
+        // Keep the entry with destroyed peer to maintain role info
+        console.log('⚠️ Keeping peer entry for potential reconnection');
+      }
     });
 
     try {
