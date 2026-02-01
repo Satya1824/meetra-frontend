@@ -25,7 +25,7 @@ export const useWebRTC = (
     if (!socket || !localStream || !roomId || !userId || hasInitialized.current) return;
     if (existingParticipants.length === 0) return;
 
-    console.log('📡 Creating peer connections for existing participants:', existingParticipants.length);
+    console.log('📡 Connecting to', existingParticipants.length, 'participant(s)');
     
     existingParticipants.forEach((participant) => {
       if (participant.id !== userId) {
@@ -64,8 +64,6 @@ export const useWebRTC = (
     socket.on('signal', ({ signal, userId: signalingUserId }: any) => {
       if (signalingUserId === userId) return;
 
-      console.log('📨 Received signal from:', signalingUserId);
-
       let peerConnection = peersRef.current.get(signalingUserId);
 
       if (!peerConnection) {
@@ -78,12 +76,16 @@ export const useWebRTC = (
         peersRef.current = newPeers;
         setPeers(new Map(newPeers));
       } else {
-        console.log('🔄 Signaling existing peer:', signalingUserId);
-        // Signal existing peer
+        // Signal existing peer if not destroyed
         try {
-          peerConnection.peer.signal(signal);
-        } catch (error) {
-          console.error('Error signaling peer:', error);
+          if (!peerConnection.peer.destroyed) {
+            peerConnection.peer.signal(signal);
+          }
+        } catch (error: any) {
+          // Ignore errors after peer is destroyed
+          if (!error.message?.includes('peer is destroyed')) {
+            console.error('Error signaling peer:', error);
+          }
         }
       }
     });
@@ -154,12 +156,24 @@ export const useWebRTC = (
       }
     });
 
-    peer.on('error', (error) => {
-      console.error('Peer error:', error);
+    peer.on('error', (error: any) => {
+      // Ignore certain expected errors
+      if (error.code === 'ERR_CONNECTION_FAILURE' || 
+          error.message?.includes('setRemoteDescription') ||
+          error.message?.includes('connection failed')) {
+        console.log('⚠️ Peer connection error (will retry):', targetUserId);
+      } else {
+        console.error('Peer error:', error);
+      }
     });
 
     peer.on('close', () => {
-      console.log('Peer connection closed:', targetUserId);
+      console.log('📴 Peer connection closed:', targetUserId);
+      // Clean up this peer
+      const newPeers = new Map(peersRef.current);
+      newPeers.delete(targetUserId);
+      peersRef.current = newPeers;
+      setPeers(new Map(newPeers));
     });
 
     return peer;
@@ -206,12 +220,24 @@ export const useWebRTC = (
       }
     });
 
-    peer.on('error', (error) => {
-      console.error('Peer error:', error);
+    peer.on('error', (error: any) => {
+      // Ignore certain expected errors
+      if (error.code === 'ERR_CONNECTION_FAILURE' || 
+          error.message?.includes('setRemoteDescription') ||
+          error.message?.includes('connection failed')) {
+        console.log('⚠️ Peer connection error (will retry):', signalingUserId);
+      } else {
+        console.error('Peer error:', error);
+      }
     });
 
     peer.on('close', () => {
-      console.log('Peer connection closed:', signalingUserId);
+      console.log('📴 Peer connection closed:', signalingUserId);
+      // Clean up this peer
+      const newPeers = new Map(peersRef.current);
+      newPeers.delete(signalingUserId);
+      peersRef.current = newPeers;
+      setPeers(new Map(newPeers));
     });
 
     try {
