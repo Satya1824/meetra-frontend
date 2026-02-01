@@ -14,9 +14,33 @@ export const useWebRTC = (
   roomId: string | null,
   userId: string | null,
   socket: any,
+  existingParticipants: Participant[] = [],
 ) => {
   const [peers, setPeers] = useState<Map<string, PeerConnection>>(new Map());
   const peersRef = useRef<Map<string, PeerConnection>>(new Map());
+  const hasInitialized = useRef(false);
+
+  // Create peer connections for existing participants when joining
+  useEffect(() => {
+    if (!socket || !localStream || !roomId || !userId || hasInitialized.current) return;
+    if (existingParticipants.length === 0) return;
+
+    console.log('📡 Creating peer connections for existing participants:', existingParticipants.length);
+    
+    existingParticipants.forEach((participant) => {
+      if (participant.id !== userId) {
+        // Create peer connection as initiator for existing users
+        const peer = createPeer(participant.id, localStream, socket, roomId, userId);
+        
+        const newPeers = new Map(peersRef.current);
+        newPeers.set(participant.id, { peer });
+        peersRef.current = newPeers;
+        setPeers(new Map(newPeers));
+      }
+    });
+
+    hasInitialized.current = true;
+  }, [existingParticipants, socket, localStream, roomId, userId]);
 
   useEffect(() => {
     if (!socket || !localStream || !roomId || !userId) return;
@@ -25,30 +49,36 @@ export const useWebRTC = (
     socket.on('user-joined', ({ userId: newUserId }: { userId: string }) => {
       if (newUserId === userId) return;
 
+      console.log('👤 New user joined, creating peer connection:', newUserId);
+
       // Create peer connection as initiator
       const peer = createPeer(newUserId, localStream, socket, roomId, userId);
       
       const newPeers = new Map(peersRef.current);
       newPeers.set(newUserId, { peer });
       peersRef.current = newPeers;
-      setPeers(newPeers);
+      setPeers(new Map(newPeers));
     });
 
     // Handle receiving signal from another peer
     socket.on('signal', ({ signal, userId: signalingUserId }: any) => {
       if (signalingUserId === userId) return;
 
+      console.log('📨 Received signal from:', signalingUserId);
+
       let peerConnection = peersRef.current.get(signalingUserId);
 
       if (!peerConnection) {
+        console.log('🆕 Creating new peer connection as receiver for:', signalingUserId);
         // Create peer connection as receiver
         const peer = addPeer(signal, localStream, socket, roomId, userId, signalingUserId);
         
         const newPeers = new Map(peersRef.current);
         newPeers.set(signalingUserId, { peer });
         peersRef.current = newPeers;
-        setPeers(newPeers);
+        setPeers(new Map(newPeers));
       } else {
+        console.log('🔄 Signaling existing peer:', signalingUserId);
         // Signal existing peer
         try {
           peerConnection.peer.signal(signal);
@@ -114,6 +144,7 @@ export const useWebRTC = (
     });
 
     peer.on('stream', (remoteStream) => {
+      console.log('📹 Received stream from:', targetUserId);
       const newPeers = new Map(peersRef.current);
       const existingPeer = newPeers.get(targetUserId);
       if (existingPeer) {
@@ -165,6 +196,7 @@ export const useWebRTC = (
     });
 
     peer.on('stream', (remoteStream) => {
+      console.log('📹 Received stream from:', signalingUserId);
       const newPeers = new Map(peersRef.current);
       const existingPeer = newPeers.get(signalingUserId);
       if (existingPeer) {

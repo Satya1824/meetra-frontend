@@ -27,6 +27,7 @@ export default function RoomPage() {
   const [error, setError] = useState<string | null>(null);
   const [actualRoomId, setActualRoomId] = useState<string | null>(null);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
+  const [existingParticipants, setExistingParticipants] = useState<Participant[]>([]);
 
   const {
     userId,
@@ -50,7 +51,13 @@ export default function RoomPage() {
     clearRoom,
   } = useRoomStore();
 
-  const { peers } = useWebRTC(localStream, actualRoomId || roomId, userId, socket);
+  const { peers } = useWebRTC(
+    localStream, 
+    actualRoomId || roomId, 
+    userId, 
+    socket,
+    existingParticipants
+  );
 
   // Handle transcript from speech recognition
   const handleTranscript = useCallback(
@@ -183,14 +190,17 @@ export default function RoomPage() {
     if (!socket) return;
 
     // Room joined successfully
-    socket.on('room-joined', ({ userId: newUserId, participants: existingParticipants }: any) => {
-      console.log('✅ Joined room:', roomId, 'User ID:', newUserId);
+    socket.on('room-joined', ({ userId: newUserId, participants: existingParticipantsData }: any) => {
+      console.log('✅ Joined room:', roomId, 'User ID:', newUserId, 'Existing participants:', existingParticipantsData.length);
       setUserId(newUserId);
 
-      // Add existing participants
-      existingParticipants.forEach((p: Participant) => {
+      // Add existing participants to store
+      existingParticipantsData.forEach((p: Participant) => {
         addParticipant(p);
       });
+
+      // Set existing participants for WebRTC hook
+      setExistingParticipants(existingParticipantsData);
     });
 
     // Room created (if creator)
